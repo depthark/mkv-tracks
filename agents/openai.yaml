@@ -1,0 +1,3 @@
+interface:
+  display_name: "MKV Tracks"
+  short_description: "Inspect MKV tracks, drop unwanted ones, pack external subtitles in"
