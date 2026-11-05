@@ -20,6 +20,13 @@ from pathlib import Path
 
 SUB_EXTS = {".srt", ".ass", ".ssa", ".vtt", ".sup", ".idx", ".sub"}
 TEXT_SUB_EXTS = {".srt", ".ass", ".ssa", ".vtt"}
+MAX_SNIFF = 4 * 1024 * 1024  # bytes read for charset/language sniffing
+_CTRL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069]")
+
+
+def clean(v):
+    """Strip control / bidi chars from untrusted metadata (track names, titles, file names)."""
+    return _CTRL.sub("", v) if isinstance(v, str) else v
 
 # filename token -> ISO 639-2 (what mkvmerge uses)
 LANG_TOKENS = {
@@ -67,7 +74,8 @@ def identify(mkv: Path) -> dict:
 # ---------------------------------------------------------------- external subs
 
 def read_text(p: Path) -> tuple[str, str]:
-    raw = p.read_bytes()
+    with open(p, "rb") as f:
+        raw = f.read(MAX_SNIFF)
     for enc in ("utf-8-sig", "utf-16"):
         if enc == "utf-16" and not raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
             continue
@@ -111,7 +119,7 @@ def guess_lang_from_name(p: Path, mkv_stem: str) -> str | None:
 
 
 def describe_external(p: Path, mkv_stem: str) -> dict:
-    info = {"path": str(p), "file": p.name, "format": p.suffix.lower().lstrip("."),
+    info = {"path": str(p), "file": clean(p.name), "format": p.suffix.lower().lstrip("."),
             "size": p.stat().st_size, "encoding": None, "language": None,
             "language_source": None, "forced_hint": bool(re.search(r"forced", p.stem, re.I)),
             "sdh_hint": bool(re.search(r"\b(sdh|hi|cc)\b", p.stem, re.I))}
@@ -144,7 +152,7 @@ def find_externals(mkv: Path, all_in_folder: bool) -> list[dict]:
         d = mkv.parent / sd
         if d.is_dir():
             for p in sorted(d.rglob("*")):
-                if p.suffix.lower() in SUB_EXTS and p.is_file():
+                if p.suffix.lower() in SUB_EXTS and p.is_file() and not p.is_symlink():
                     subs.append(describe_external(p, stem))
     return subs
 
@@ -163,7 +171,7 @@ def track_summary(t: dict) -> dict:
     p = t.get("properties", {})
     s = {"id": t["id"], "type": t["type"], "codec": t.get("codec"),
          "language": p.get("language_ietf") or p.get("language"),
-         "name": p.get("track_name"), "default": p.get("default_track", False),
+         "name": clean(p.get("track_name")), "default": p.get("default_track", False),
          "forced": p.get("forced_track", False)}
     if t["type"] == "video":
         s["detail"] = p.get("pixel_dimensions")
@@ -182,9 +190,9 @@ def track_summary(t: dict) -> dict:
 def analyze_one(mkv: Path, all_in_folder: bool) -> dict:
     d = identify(mkv)
     return {"file": str(mkv), "size": mkv.stat().st_size,
-            "title": d.get("container", {}).get("properties", {}).get("title"),
+            "title": clean(d.get("container", {}).get("properties", {}).get("title")),
             "tracks": [track_summary(t) for t in d.get("tracks", [])],
-            "attachments": [{"id": a["id"], "file_name": a.get("file_name"),
+            "attachments": [{"id": a["id"], "file_name": clean(a.get("file_name")),
                              "content_type": a.get("content_type")} for a in d.get("attachments", [])],
             "chapters": sum(c.get("num_entries", 0) for c in d.get("chapters", [])),
             "external_subtitles": find_externals(mkv, all_in_folder)}
@@ -215,7 +223,7 @@ def print_report(r: dict) -> None:
 
 
 def cmd_analyze(a) -> None:
-    target = Path(a.path)
+    target = Path(a.path).resolve()
     mkvs = sorted(target.glob("*.mkv")) if target.is_dir() else [target]
     if not mkvs:
         sys.exit(f"ERROR: no .mkv files in {target}")
@@ -259,6 +267,7 @@ def cmd_pack(a) -> None:
         sys.exit(f"ERROR: no such track id(s): {sorted(unknown)}")
 
     adds = [parse_opts(s) for s in a.add or []]
+    adds = [(str(Path(path).resolve()), o) for path, o in adds]
     for path, _ in adds:
         if not Path(path).is_file():
             sys.exit(f"ERROR: subtitle not found: {path}")
@@ -347,6 +356,10 @@ def cmd_pack(a) -> None:
     if free < mkv.stat().st_size * 1.05:
         sys.exit(f"ERROR: not enough free space on target drive ({fmt_size(free)} free, "
                  f"need ~{fmt_size(mkv.stat().st_size)}).")
+
+    backup = mkv.with_name(mkv.stem + ".orig-mkvtracks.mkv")
+    if a.replace and backup.exists():
+        sys.exit(f"ERROR: {backup} already exists (left over from an earlier run?); move it away and re-run.")
 
     rc = subprocess.run(cmd).returncode
     if rc >= 2:
