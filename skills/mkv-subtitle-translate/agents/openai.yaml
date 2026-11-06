@@ -1,0 +1,3 @@
+interface:
+  display_name: "MKV Subtitle Translate"
+  short_description: "Translate an MKV's English subs into Czech, Slovak and more, like a subtitler, and pack them in"
